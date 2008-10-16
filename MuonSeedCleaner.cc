@@ -65,10 +65,11 @@ MuonSeedCleaner::~MuonSeedCleaner(){
   if (theService) delete theService;
 }
 
-/* 
- * Cleaner
+/*********************************** 
  *
- */
+ *  Seed Cleaner
+ *
+ ***********************************/
 
 std::vector<TrajectorySeed> MuonSeedCleaner::seedCleaner(const edm::EventSetup& eventSetup, std::vector<TrajectorySeed>& seeds ) {
 
@@ -82,28 +83,44 @@ std::vector<TrajectorySeed> MuonSeedCleaner::seedCleaner(const edm::EventSetup& 
   // ckeck each group and pick the good one
   for (size_t i=0; i< theCollection.size(); i++ ) {
 
-      // pick the seed w/ more than 1 segments and w/ 1st layer segment information
+      // separate seeds w/ more than 1 segments and w/ 1st layer segment information
       SeedContainer goodSeeds   = SeedCandidates( theCollection[i], true );
       SeedContainer otherSeeds  = SeedCandidates( theCollection[i], false );
       if ( MomentumFilter( goodSeeds ) )  {
-         std::vector<TrajectorySeed> betterSeeds = LengthFilter( goodSeeds ); 
-	 TrajectorySeed bestSeed   = BetterChi2( betterSeeds );
-	 //TrajectorySeed bestSeed   = BetterDirection( betterSeeds );
+         //std::cout<<" == type1 "<<std::endl;
+         TrajectorySeed bestSeed = Chi2LengthSelection( goodSeeds );
 	 FinalSeeds.push_back( bestSeed );
+           
+         GlobalPoint seedgp = SeedPosition( bestSeed );
+         double eta = fabs( seedgp.eta() );
+         if ( goodSeeds.size() > 2 && eta > 1.5 ) {
+            TrajectorySeed anotherSeed  = MoreRecHits( goodSeeds );
+            FinalSeeds.push_back( anotherSeed );
+         }
       } 
       else if( MomentumFilter( otherSeeds ) ) {
          //std::cout<<" == type2 "<<std::endl;
-         SeedContainer betterSeeds = LengthFilter( otherSeeds ); 
-	 TrajectorySeed bestSeed   = BetterChi2( betterSeeds );
-	 //TrajectorySeed bestSeed   = BetterDirection( betterSeeds );
+         TrajectorySeed bestSeed = MoreRecHits( otherSeeds );
 	 FinalSeeds.push_back( bestSeed );
+
+         GlobalPoint seedgp = SeedPosition( bestSeed );
+         double eta = fabs( seedgp.eta() );
+         if ( otherSeeds.size() > 2 && eta > 1.5 ) {
+            TrajectorySeed anotherSeed  = LeanHighMomentum( otherSeeds );
+            FinalSeeds.push_back( anotherSeed );
+         }
       } 
       else {
          //std::cout<<" == type3 "<<std::endl;
-         SeedContainer betterSeeds = LengthFilter( theCollection[i] ); 
-	 TrajectorySeed bestSeed   = BetterChi2( betterSeeds );
-	 //TrajectorySeed bestSeed   = BetterDirection( betterSeeds );
+         TrajectorySeed bestSeed = LeanHighMomentum( theCollection[i] );
 	 FinalSeeds.push_back( bestSeed );
+
+         GlobalPoint seedgp = SeedPosition( bestSeed );
+         double eta = fabs( seedgp.eta() );
+         if ( theCollection.size() > 2 && eta > 1.5 ) {
+            TrajectorySeed anotherSeed  = BiggerCone( theCollection[i] );
+            FinalSeeds.push_back( anotherSeed );
+         }
       }
   }  
   return FinalSeeds ; 
@@ -111,36 +128,13 @@ std::vector<TrajectorySeed> MuonSeedCleaner::seedCleaner(const edm::EventSetup& 
 }
 
 
-TrajectorySeed MuonSeedCleaner::BetterDirection(std::vector<TrajectorySeed>& seeds ) {
-
-  float bestProjErr  = 9999.; 
-  int winner = 0 ;
-  AlgebraicSymMatrix mat(5,0) ; 
-  for ( size_t i = 0; i < seeds.size(); i++ ) {
-
-      edm::OwnVector<TrackingRecHit>::const_iterator r1 = seeds[i].recHits().first ;
-      mat = r1->parametersError().similarityT( r1->projectionMatrix() );
-      float ddx = mat[1][1]; 
-      float ddy = mat[2][2]; 
-      float dxx = mat[3][3]; 
-      float dyy = mat[4][4];
-      float projectErr = sqrt( (ddx*10000.) + (ddy*10000.) + dxx + dyy ) ;
-
-      if ( projectErr > bestProjErr ) continue;
-      winner = static_cast<int>(i) ;
-      bestProjErr = projectErr ;
-  }
-  return seeds[winner];
-
-}
-
-TrajectorySeed MuonSeedCleaner::BetterChi2(std::vector<TrajectorySeed>& seeds ) {
+TrajectorySeed MuonSeedCleaner::Chi2LengthSelection(std::vector<TrajectorySeed>& seeds ) {
 
   if ( seeds.size() == 1 ) return seeds[0];
 
-  int winner = 0 ;
-  std::vector<int>    moreHits(4,0);  
-  std::vector<double> bestChi2(4,99999.);  
+  int    winner   = 0 ;
+  int    moreHits = 0 ;  
+  double bestChi2 = 99999.;  
   for ( size_t i = 0; i < seeds.size(); i++ ) {
 
       // 1. fill out the Nchi2 of segments of the seed 
@@ -148,49 +142,116 @@ TrajectorySeed MuonSeedCleaner::BetterChi2(std::vector<TrajectorySeed>& seeds ) 
       //double pt = sqrt( (mom.x()*mom.x()) + (mom.y()*mom.y()) );
       //std::cout<<" > SEED"<<i<<"  pt:"<<pt<< std::endl;
 
-      int it = -1;
-      std::vector<double> theChi2(4,99999.);  
-      std::vector<int>    theHits(4,0);  
-      for (edm::OwnVector<TrackingRecHit>::const_iterator r1 = seeds[i].recHits().first; r1 != seeds[i].recHits().second; r1++){
-          it++;
-          //std::cout<<"    segmet : "<<it <<std::endl; 
-          theHits[it] = NRecHitsFromSegment( *r1 );
-          theChi2[it] = NChi2OfSegment( *r1 );
-      }
+      double theChi2 = SeedChi2( seeds[i] );  
+      double dChi2 = fabs( 1. - (theChi2 / bestChi2)) ;
+      int    theHits = seeds[i].nHits() ;  
+      int    dHits = theHits - moreHits ;
       //std::cout<<" -----  "<<std::endl;
 
-      // 2. longer segment
-      for (int j =0; j<4; j++) {
-
-          if ( theHits[j] <  moreHits[j] ) break;
-
-          if ( theHits[j] == moreHits[j] ) { 
-            ///  compare the chi2 list
-            bool decisionMade = false ;
-            for (int k =0; k<4; k++) {
-               if ( theChi2[k] >  bestChi2[k] ) break;
-               if ( theChi2[k] == bestChi2[k] ) continue;
-               if ( theChi2[k] <  bestChi2[k] ) {
-                  bestChi2 = theChi2 ;
-                  winner = static_cast<int>(i) ;
-                  decisionMade = true;
-               }
-               break;
-            }
-            if ( decisionMade) break;
-            if (!decisionMade) continue;
-          }
-
-          if ( theHits[j] >  moreHits[j] ) {
-             moreHits = theHits ;
-             winner = static_cast<int>(i) ;
-          }
-          break;
+      // 2. better chi2 
+      if ( theChi2 < bestChi2 && dChi2 > 0.05 ) {
+           winner = static_cast<int>(i) ;
+           bestChi2 = theChi2 ;
+           moreHits = theHits ;
       }
+      // 3. if chi2 is not much better, pick more rechits one 
+      if ( theChi2 >= bestChi2 && dChi2 < 0.05 && dHits > 0 ) {
+           winner = static_cast<int>(i) ;
+           bestChi2 = theChi2 ;
+           moreHits = theHits ;
+      }
+
   }
   //std::cout<<" Winner is "<< winner <<std::endl;
-  return seeds[winner];
+  TrajectorySeed theSeed =  seeds[winner];
+  seeds.erase( seeds.begin()+winner ); 
+  return theSeed;
 }
+
+TrajectorySeed MuonSeedCleaner::BiggerCone(std::vector<TrajectorySeed>& seeds ) {
+
+  if ( seeds.size() == 1 ) return seeds[0];
+
+  float biggerProjErr  = 9999.; 
+  int winner = 0 ;
+  AlgebraicSymMatrix mat(5,0) ; 
+  for ( size_t i = 0; i < seeds.size(); i++ ) {
+
+      edm::OwnVector<TrackingRecHit>::const_iterator r1 = seeds[i].recHits().first ;
+      mat = r1->parametersError().similarityT( r1->projectionMatrix() );
+
+      int    NRecHits = NRecHitsFromSegment( *r1 );
+
+      float ddx = mat[1][1]; 
+      float ddy = mat[2][2]; 
+      float dxx = mat[3][3]; 
+      float dyy = mat[4][4];
+      float projectErr = sqrt( (ddx*10000.) + (ddy*10000.) + dxx + dyy ) ;
+
+      if ( NRecHits < 5 ) continue ;
+      if ( projectErr < biggerProjErr ) continue;
+
+      winner = static_cast<int>(i) ;
+      biggerProjErr = projectErr ;
+  }
+  TrajectorySeed theSeed = seeds[winner];
+  seeds.erase( seeds.begin()+winner ); 
+  return theSeed;
+
+}
+
+TrajectorySeed MuonSeedCleaner::LeanHighMomentum( std::vector<TrajectorySeed>& seeds ) {
+
+  if ( seeds.size() == 1 ) return seeds[0];
+
+  double highestPt = 0. ;  
+  int    winner    = 0  ;
+  for ( size_t i = 0; i < seeds.size(); i++ ) {
+       GlobalVector mom = SeedMomentum( seeds[i] );
+       double pt = sqrt( (mom.x()*mom.x()) + (mom.y()*mom.y()) );
+       if ( pt > highestPt ) { 
+          winner = static_cast<int>(i) ;
+          highestPt = pt ;
+       }
+  }
+  TrajectorySeed theSeed = seeds[winner];
+  seeds.erase( seeds.begin()+winner ); 
+  return theSeed;
+
+}
+
+
+TrajectorySeed MuonSeedCleaner::MoreRecHits(std::vector<TrajectorySeed>& seeds ) {
+
+  if ( seeds.size() == 1 ) return seeds[0];
+
+  int    winner   = 0 ;
+  int    moreHits = 0 ;  
+  double betterChi2 = 99999.;
+  for ( size_t i = 0; i < seeds.size(); i++ ) {
+
+      int    theHits = 0;  
+      for (edm::OwnVector<TrackingRecHit>::const_iterator r1 = seeds[i].recHits().first; r1 != seeds[i].recHits().second; r1++){
+          theHits += NRecHitsFromSegment( *r1 );
+      }
+
+      double theChi2 = SeedChi2( seeds[i] );  
+   
+      if ( theHits == moreHits && theChi2 < betterChi2  ) {
+         betterChi2 = theChi2; 
+         winner = static_cast<int>(i) ;
+      } 
+      if ( theHits > moreHits ) {
+           moreHits = theHits ;
+           betterChi2 = theChi2;
+           winner = static_cast<int>(i) ;
+      }
+  }
+  TrajectorySeed theSeed = seeds[winner];
+  seeds.erase( seeds.begin()+winner ); 
+  return theSeed;
+}
+
 
 SeedContainer MuonSeedCleaner::LengthFilter(std::vector<TrajectorySeed>& seeds ) {
  
@@ -216,6 +277,7 @@ SeedContainer MuonSeedCleaner::LengthFilter(std::vector<TrajectorySeed>& seeds )
   
 }
 
+
 bool MuonSeedCleaner::MomentumFilter(std::vector<TrajectorySeed>& seeds ) {
 
   bool findgoodMomentum = false;
@@ -224,8 +286,8 @@ bool MuonSeedCleaner::MomentumFilter(std::vector<TrajectorySeed>& seeds ) {
   for ( size_t i = 0; i < goodMomentumSeeds.size(); i++ ) {
        GlobalVector mom = SeedMomentum( goodMomentumSeeds[i] );
        double pt = sqrt( (mom.x()*mom.x()) + (mom.y()*mom.y()) );
-       //if ( pt < 6.  || pt > 3000. ) continue;
-       if ( pt < 6. ) continue;
+       if ( pt < 6. || pt > 2000. ) continue;
+       //if ( pt < 6. ) continue;
        //std::cout<<" passed momentum :"<< pt <<std::endl;
        seeds.push_back( goodMomentumSeeds[i] );
        findgoodMomentum = true;  
@@ -234,6 +296,8 @@ bool MuonSeedCleaner::MomentumFilter(std::vector<TrajectorySeed>& seeds ) {
 
   return findgoodMomentum;
 }
+
+
 
 SeedContainer MuonSeedCleaner::SeedCandidates( std::vector<TrajectorySeed>& seeds, bool good ) {
 
@@ -247,7 +311,8 @@ SeedContainer MuonSeedCleaner::SeedCandidates( std::vector<TrajectorySeed>& seed
   for ( size_t i = 0; i < seeds.size(); i++ ) {
 
       if (seeds[i].nHits() > 1 ) longSeed = true ;
-      //std::cout<<"  Seed: "<<i<< std::endl;
+      //std::cout<<"  Seed: "<<i<<" w/"<<seeds[i].nHits()<<" segs "<<std::endl;
+      // looking for 1st layer segment
       int idx = 0;
       for (edm::OwnVector<TrackingRecHit>::const_iterator r1 = seeds[i].recHits().first; r1 != seeds[i].recHits().second; r1++){
 
@@ -285,17 +350,17 @@ std::vector<SeedContainer> MuonSeedCleaner::GroupSeeds( std::vector<TrajectorySe
   std::vector<bool> usedSeed(seeds.size(),false);
 
   // categorize seeds by comparing overlapping segments or a certian eta-phi cone 
-  for (unsigned int i= 0; i<seeds.size(); i++){
+  for (size_t i= 0; i<seeds.size(); i++){
     
     if (usedSeed[i]) continue;
     theGroup.push_back( seeds[i] );
     usedSeed[i] = true ;
 
-    GlobalPoint pos1 = SeedPosition( seeds[i]);
+    GlobalPoint pos1 = SeedPosition( seeds[i] );
 
-    for (unsigned int j= i+1; j<seeds.size(); j++){
+    for (size_t j= i+1; j<seeds.size(); j++){
  
-       // seeds with overlaaping segments will be grouped together
+       // 1.1 seeds with overlaaping segments will be grouped together
        unsigned int overlapping = OverlapSegments(seeds[i], seeds[j]) ;
        if ( !usedSeed[j] && overlapping > 0 ) {
           // reject the identical seeds
@@ -308,7 +373,7 @@ std::vector<SeedContainer> MuonSeedCleaner::GroupSeeds( std::vector<TrajectorySe
        }
        if (usedSeed[j]) continue;
 
-       // seeds in a certain cone are grouped together  
+       // 1.2 seeds in a certain cone are grouped together  
        GlobalPoint pos2 = SeedPosition( seeds[j]);
        double dh = pos1.eta() - pos2.eta() ;
        double df = pos1.phi() - pos2.phi() ;
@@ -321,6 +386,7 @@ std::vector<SeedContainer> MuonSeedCleaner::GroupSeeds( std::vector<TrajectorySe
     }
     sort(theGroup.begin(), theGroup.end(), lengthSorting ) ;
     seedCollection.push_back(theGroup);
+    //std::cout<<" group "<<seedCollection.size() <<" w/"<< theGroup.size() <<" seeds"<<std::endl; 
     theGroup.clear(); 
   }
   return seedCollection;
@@ -354,6 +420,33 @@ unsigned int MuonSeedCleaner::OverlapSegments( TrajectorySeed seed1, TrajectoryS
       }
   }
   return overlapping ;
+
+}
+
+double MuonSeedCleaner::SeedChi2( TrajectorySeed seed ) {
+
+  double theChi2 = 0.;  
+  for (edm::OwnVector<TrackingRecHit>::const_iterator r1 = seed.recHits().first; r1 != seed.recHits().second; r1++){
+      //std::cout<<"    segmet : "<<it <<std::endl; 
+      theChi2 += NChi2OfSegment( *r1 );
+  }
+  theChi2 = theChi2 / seed.nHits() ;
+
+  //std::cout<<" final Length :"<<NSegs<<std::endl;
+  return theChi2 ;
+
+}
+
+int MuonSeedCleaner::SeedLength( TrajectorySeed seed ) {
+
+  int theHits = 0;  
+  for (edm::OwnVector<TrackingRecHit>::const_iterator r1 = seed.recHits().first; r1 != seed.recHits().second; r1++){
+      //std::cout<<"    segmet : "<<it <<std::endl; 
+      theHits += NRecHitsFromSegment( *r1 );
+  }
+
+  //std::cout<<" final Length :"<<NSegs<<std::endl;
+  return theHits ;
 
 }
 
